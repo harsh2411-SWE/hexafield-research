@@ -1,125 +1,216 @@
 HexaField Research
-C++20 limit order book and market-microstructure simulator
-HexaField Research is an experimental, single-instrument market simulator written in modern C++. It explores price-time-priority matching, preallocated order storage, cache-conscious data structures, SPSC message passing, and a separate market-making strategy thread.
-The project is a systems-engineering and learning exercise. It is not an exchange-connected trading system or production HFT infrastructure.
-What it contains
-Limit order book: integer-tick price levels, FIFO queues at each price, cached best bid/ask, and order lookup by ID.
-Matching engine: limit and market order processing, matching, resting orders, cancellation, modification, acknowledgements, trade events, and book-top events.
-Preallocated order storage: fixed-capacity object pool and open-addressed order-ID map.
-Concurrent message passing: fixed-size, trivially-copyable messages moved through single-producer/single-consumer rings.
-Market-data replay: CSV input followed by a deterministic synthetic two-sided event tape.
-Example strategy: a simple two-sided market maker that reacts to book-top updates and tracks a basic inventory.
-Latency instrumentation: timestamp-counter sampling and percentile reporting for the current acknowledgement-based measurement path.
+
+A C++20 Low-Latency Market Microstructure & Limit Order Book Simulator
+
+A systems-engineering project exploring the architecture and performance considerations behind modern electronic trading systems.
+
+HexaField Research is a single-instrument market simulation engine built in modern C++20. It implements deterministic price-time-priority matching, preallocated order management, cache-conscious data structures, lock-free SPSC message queues, and a separate event-driven market-making strategy.
+
+The project focuses on low-latency execution paths, predictable memory behavior, and concurrent system design.
+
+«Project scope: An experimental market simulator and systems-engineering research project. It is not connected to a live exchange and is not production HFT infrastructure.»
+
+---
+
+Core Features
+
+Component| Implementation
+Language| C++20
+Matching| Price-time-priority
+Order Book| Integer-tick price indexing
+Order Storage| Preallocated object pool
+Order Lookup| Open-addressed hash map
+Concurrency| Lock-free SPSC ring buffers
+Memory| Fixed-capacity allocation
+Market Data| CSV replay + synthetic event tape
+Strategy| Two-sided market maker
+Instrumentation| TSC-based latency sampling
+Build| CMake + optimized Release configuration
+
 Architecture
- data/mock_feed.csv
-        |
-        v
- CSV loader + deterministic synthetic tape
-        |
-        v
- MarketDataReplay thread
-        |
-        | market-data SPSC ring
-        v
- +---------------------------+
- |       MatchingEngine      |
- |                           |
- |  LimitOrderBook           |
- |  - price-indexed levels   |
- |  - FIFO orders            |
- |  - order-ID map            |
- |  - preallocated pool      |
- +---------------------------+
-        |             ^
-        | events      | strategy commands
-        v             |
- Engine-to-strategy   Strategy-to-engine
-     SPSC ring          SPSC ring
-        |             ^
-        v             |
-  MarketMaker strategy thread
-The matching engine is the sole consumer of the market-data and strategy command rings. The strategy consumes engine events on its own thread. The market-data replay runs on a separate thread.
-Repository layout
-hexafield-research/
-├── CMakeLists.txt
-├── data/
-│   └── mock_feed.csv
-├── include/
-│   └── hft/
-│       ├── config.hpp
-│       ├── cpu.hpp
-│       ├── latency.hpp
-│       ├── market_data.hpp
-│       ├── market_maker.hpp
-│       ├── matching_engine.hpp
-│       ├── memory_pool.hpp
-│       ├── order.hpp
-│       ├── order_book.hpp
-│       ├── order_map.hpp
-│       ├── spsc_ring.hpp
-│       ├── strategy.hpp
-│       └── types.hpp
-└── src/
-    ├── main.cpp
-    └── market_data.cpp
+
+HexaField follows a producer-consumer architecture with an isolated matching engine and a dedicated strategy thread.
+
+flowchart TD
+    A["CSV Market Data"] --> B["Market Data Replay"]
+    B --> C["Market Data SPSC Ring"]
+    C --> E["Matching Engine"]
+    D["Strategy Commands"] --> F["Strategy SPSC Ring"]
+    F --> E
+    E --> G["Limit Order Book"]
+    G --> H["Preallocated Order Pool"]
+    G --> I["Order ID Map"]
+    E --> J["Trade / ACK / BBO Events"]
+    J --> K["Output SPSC Ring"]
+    K --> L["Market Maker Strategy"]
+    L --> D
+    L --> M["Latency Recorder"]
+
+The matching engine is the sole consumer of incoming market-data and strategy-command queues. The market-making strategy processes engine events on its own thread.
+
+1. Matching Engine
+
+The matching engine is the central execution component.
+
+It supports:
+
+- Limit and market order processing.
+- Price-time-priority matching.
+- Resting orders.
+- Partial and complete fills.
+- Order cancellation and modification.
+- Order acknowledgements and rejection events.
+- Trade event generation.
+- Best bid and ask updates.
+
+The matching path is designed around predictable operations, avoiding dynamic allocation, mutexes, and virtual dispatch in the core processing loop.
+
+2. Limit Order Book
+
+The order book uses an integer-tick price representation with separate bid and ask sides.
+
+Key design choices:
+
+- Direct price-level indexing.
+- FIFO queues at individual price levels.
+- Cached best bid and best ask.
+- Intrusive order linking.
+- Constant-time order lookup by ID through a pre-sized hash map.
+
+The design prioritizes predictable access patterns and efficient order lifecycle management.
+
+3. Memory Management
+
+Dynamic allocation in latency-sensitive processing paths can introduce unpredictable overhead.
+
+HexaField uses:
+
+- Fixed-capacity object pools.
+- Preallocated order storage.
+- Open-addressed order-ID mapping.
+- Compile-time capacity configuration.
+- Intrusive free-list management.
+
+The objective is to keep the matching hot path free from routine heap allocation.
+
+4. Concurrent Message Passing
+
+The engine uses fixed-size, trivially copyable messages exchanged through lock-free Single-Producer Single-Consumer (SPSC) ring buffers.
+
+Implementation details:
+
+- Power-of-two queue capacities.
+- Atomic producer and consumer indices.
+- Acquire-release synchronization.
+- Cache-line separation of queue metadata.
+- Spin-based backpressure with CPU pause instructions.
+
+This architecture separates market-data ingestion, order processing, and strategy execution without introducing mutex-based coordination into the message-passing path.
+
+5. Market Data Replay
+
+The simulator supports CSV-based market-data input.
+
+It also generates a deterministic synthetic two-sided event tape, allowing the matching engine and strategy to operate without depending entirely on an external dataset.
+
+Supported CSV event types:
+
+- Limit orders
+- Market orders
+- Cancellations
+- Modifications
+
+6. Market-Making Strategy
+
+The project includes an event-driven two-sided market-making strategy.
+
+It:
+
+- Reacts to best bid/ask updates.
+- Maintains symmetric quotes around the calculated midpoint.
+- Cancels and replaces quotes when market conditions change.
+- Tracks inventory from executed fills.
+- Processes acknowledgements and trade events.
+
+This provides a practical environment for exploring the interaction between order-book dynamics and automated trading strategies.
+
+7. Performance Instrumentation
+
+HexaField includes a preallocated latency recorder based on CPU timestamp-counter measurements.
+
+It provides:
+
+- Timestamp-counter calibration.
+- Correlated event measurements.
+- Preallocated sample storage.
+- Percentile-based reporting.
+- P50, P90, P99 and maximum latency output.
+
+These measurements are intended for experimentation and profiling, not as independently verified exchange-grade latency benchmarks.
+
+Build & Run
+
 Requirements
-CMake 3.20 or newer
-A C++20 compiler
-A supported native threading toolchain
-The CMake configuration has compiler-specific options for MSVC and GNU/Clang. The GNU/Clang Release configuration currently enables -O3, -march=native, LTO, and disables exceptions and RTTI. These settings are intended for local experimentation; -march=native can produce binaries that are not portable to older or different CPUs.
+
+- C++20-compatible compiler
+- CMake 3.20+
+- Threads support
+
 Build
-From the repository root:
+
+git clone https://github.com/harsh2411-SWE/hexafield-research.git
+
+cd hexafield-research
+
 cmake -S . -B build -DCMAKE_BUILD_TYPE=Release
-cmake --build build --config Release -j
-The executable target is hft_sim.
-Run
-Linux / macOS shell:
+
+cmake --build build --config Release
+
+Execute
+
 ./build/hft_sim
-On a multi-configuration generator such as Visual Studio, the executable is typically under build/Release/.
-By default, the program searches for mock_feed.csv, data/mock_feed.csv, and the configured source data directory. You can also pass an explicit feed path:
-./build/hft_sim data/mock_feed.csv
-The program loads the CSV events, appends a deterministic synthetic tape, starts the market-data, matching-engine, and strategy threads, then prints command/trade counts, inventory, best bid/ask, and latency summary output.
-The replay is synthetic and intended for exercising the simulator; it is not a representation of live exchange data.
-CSV feed format
-The loader expects a header followed by rows in this format:
-timestamp_ns,type,side,price,qty,order_id
-1000,L,B,10000,50,1
-1100,L,B,9990,80,2
-1200,L,S,10020,50,3
-Field            Meaning
-timestamp_ns   Input/feed timestamp type           L limit, M market, C cancel, R modify side           B buy, S sell price          Integer price ticks qty            Order quantity order_id       Order identifier
-Prices are represented as integer ticks. The configured book range is defined in include/hft/config.hpp.
-Implementation notes
-Order book and memory
-The book uses a flat array of price levels over a configured integer-tick range. Each price level maintains an intrusive FIFO queue. Orders are stored in a fixed-capacity object pool, and the order-ID map uses open addressing with linear probing and tombstones.
-SPSC queues
-The ring buffer is designed for exactly one producer and one consumer per queue. It uses power-of-two capacities, acquire/release atomics, cached indices, and cache-line separation. Do not use an instance as a multi-producer or multi-consumer queue.
-Strategy dispatch
-The example market maker is dispatched through a CRTP strategy base. It reacts to book-top and trade events and submits limit/cancel commands through the strategy-to-engine ring.
-CPU affinity
-The executable attempts to pin the engine, strategy, and market-data threads to logical CPU indices. Affinity requests may fail or behave differently depending on operating system permissions and available CPUs; the program continues if pinning is unavailable.
-Performance measurement
-The project includes timestamp-counter sampling and reports percentile values from the current recorder. Treat these numbers as experimental instrumentation, not as independently validated exchange latency or end-to-end tick-to-trade performance.
-For meaningful comparisons, record at least:
-CPU model and operating system
-Compiler and compiler version
-Build type and compile flags
-Feed size and event mix
-Warm-up and measurement procedure
-Whether CPU affinity was successfully applied
-Repeated-run distributions, not only one result
-No throughput or latency figures are claimed in this README. Publish benchmark numbers only alongside the environment and methodology used to obtain them.
-Current scope and limitations
-This repository is an evolving simulator. Before treating it as a correctness or performance reference, the implementation should be strengthened with:
-Automated tests for price-time priority, partial fills, cancel/modify behavior, and book invariants
-Collision/tombstone and duplicate-ID tests for the order map
-Explicit validation of malformed CSV rows and invalid order fields
-A documented shutdown/drain protocol for all producer-consumer queues
-Sanitizer and stress-test runs
-Reproducible benchmarks with clearly defined latency boundaries
-The current example is single-instrument and uses synthetic replay; it does not implement exchange connectivity, a production risk layer, persistence, or a full market-data protocol.
-Author
-Harsh Kumar Jha
-C++20 · Systems Programming · Backend Engineering
-GitHub: harsh2411-SWE
-HexaField Research is an independent engineering project for exploring market simulation and performance-sensitive C++ design. It is not financial advice and is not intended for live trading.
+
+Alternatively, provide a custom CSV feed:
+
+./build/hft_sim path/to/market_data.csv
+
+CSV Format
+
+timestamp,type,side,price,qty,order_id
+100000,L,B,10000,50,1
+100001,L,S,10020,40,2
+100002,M,B,0,10,3
+
+Supported event codes:
+
+Code| Meaning
+L| Limit
+M| Market
+C| Cancel
+R| Modify
+B| Buy
+S| Sell
+
+Engineering Focus
+
+HexaField Research explores several important systems-programming concepts:
+
+- Low-latency-oriented C++ design.
+- Cache-conscious data structures.
+- Lock-free communication primitives.
+- Memory allocation control.
+- Concurrent producer-consumer architectures.
+- Deterministic event processing.
+- Market microstructure simulation.
+- Performance measurement and profiling.
+
+Disclaimer
+
+This project is intended for educational purposes, systems-engineering experimentation, and research into electronic market infrastructure.
+
+It does not provide live exchange connectivity, production-grade risk controls, or verified high-frequency trading performance.
+
+---
+
+HexaField Research
+C++20 · Systems Engineering · Market Microstructure · Low-Latency Architecture
